@@ -2,7 +2,6 @@ import open3d as o3d
 from image_geometry import PinholeCameraModel
 from sensor_msgs.msg import CameraInfo
 import yaml
-import pickle
 
 import numpy as np
 from skimage import draw
@@ -12,6 +11,7 @@ import spatialmath as sm
 import os
 import copy
 import time
+import cv2
 
 
 def init_camera_model(camera_model_path : str) -> PinholeCameraModel:
@@ -36,28 +36,34 @@ def init_camera_model(camera_model_path : str) -> PinholeCameraModel:
     return camera_model
 
 
-def project_to_image(pcd, radius: int = 20):
+def project_to_image(pcd, z_filter_on : bool = True, flip : bool = False, radius: int = 20):
+    # cv2.namedWindow("Image", cv2.WINDOW_NORMAL)
     image = np.ones((cam_model.height, cam_model.width, 3), dtype='uint8') * 255
-    for idx, (point, colour) in enumerate(zip(pcd.points, pcd.colors)):
 
-        x, y, z = point
-        if z < 0:
+    points = np.asarray(pcd.points)
+    colors = np.asarray(pcd.colors)
+    if flip:
+        # only doing this because by chance the ordering of the point cloud
+        # has the yellow-magenta side later than the blue-green side. So this
+        # is used to demonstrate importance of the z filter. All it does is reverse
+        # the order of the points in the array, it doesn't change the data itself
+        points = np.flipud(points)
+        colors = np.flipud(colors)
+
+    for (point, colour) in zip(points, colors):
+
+        x, y, z = point        
+        if z_filter_on and z < 0:
             continue # ignore points behind image plane
-
         (u,v) = cam_model.project3dToPixel((x, y, z))
-
-        if point[0] == 0 and point[1] == 0 and point[2] == 2:
-            print("u,v:",u,v, colour)
-
-        # print("IDX: %02d, (x,y): %f, %f, (u,v): %0.2f, %0.2f -- "%(idx, x, y, u, v), end='')
 
         # Paint pixel
         if (u >= 0 and v >= 0) and (u < cam_model.width and v < cam_model.height):
-            # print("Valid -- index: %02d, (x,y): %f, %f, (u,v): %0.2f, %0.2f, colour: %f, %f, %f"%(idx, x, y, u, v, *colour))
             rr, cc = draw.ellipse(v, u, r_radius=radius, c_radius=radius, shape=image.shape) #TODO this should be more complicated shape
             image[rr,cc,:] = colour*255
-        # else:
-            # print("Invalid")
+
+        # cv2.imshow("Image", image)
+        # cv2.waitKey(1)
     
     return image
 
@@ -88,34 +94,6 @@ def create_cube(cube_size, num_pts):
     return points, colours
 
 
-# def create_surface(side_size, num_pts, z_plane):
-#     # Create points vector
-#     xx, yy, zz = np.meshgrid(np.linspace(-side_size, side_size, num_pts), np.linspace(-side_size, side_size, num_pts), np.linspace(-side_size, side_size, num_pts))
-#     xx = xx.reshape(-1)
-#     yy = yy.reshape(-1)
-#     zz = zz.reshape(-1)
-
-#     points = np.zeros((xx.shape[0], 3))
-#     points[:,0] = xx
-#     points[:,1] = yy
-#     points[:,2] = z_plane
-
-#     points = np.unique(points, axis=0)
-#     print(points.shape)
-#     points = np.vstack([points, [0,0,z_plane]])
-#     print(points.shape)
-
-#     # Colour vector
-#     colours = np.zeros_like(points)
-#     colours[:,0] = (points[:,0] - points[:,0].min()) / (points[:,0].max() - points[:,0].min())
-#     colours[:,1] = (points[:,1] - points[:,1].min()) / (points[:,1].max() - points[:,1].min())
-#     colours[:,2] = (points[:,2] - points[:,2].min()) / (points[:,2].max() - points[:,2].min())
-#     colours[-1, :] = [0,0,1] # blue origin
-
-#     # Return points and colours
-#     return points, colours
-
-
 def visualise_coordinate_frames(camera_optical_frame):
     base_link_coord = o3d.geometry.TriangleMesh.create_coordinate_frame()
     base_link_coord.scale(1, center=(0, 0, 0))
@@ -128,6 +106,9 @@ def visualise_coordinate_frames(camera_optical_frame):
 
 
 def visualise_cube_and_coordinate_frames(pcd, camera_optical_frame):
+    origin_pcd = o3d.geometry.TriangleMesh.create_sphere(0.1)
+    origin_pcd.paint_uniform_color([0,0,0])
+
     base_link_coord = o3d.geometry.TriangleMesh.create_coordinate_frame()
     base_link_coord.scale(1, center=(0, 0, 0))
 
@@ -135,18 +116,34 @@ def visualise_cube_and_coordinate_frames(pcd, camera_optical_frame):
     camera_optical_coord.scale(0.5, center=(0, 0, 0))
     camera_optical_coord.transform(camera_optical_frame.A) 
 
-    o3d.visualization.draw_geometries([pcd, base_link_coord, camera_optical_coord])
+    o3d.visualization.draw_geometries([pcd, base_link_coord, camera_optical_coord, origin_pcd])
 
 
-def visualise_cube_results(pcd_original, pcd, image_original, image_trans, optical_frame):
-    f, (ax1, ax2) = plt.subplots(1,2)
-    ax1.imshow(image_original)
-    ax1.set_title("Original")
-    ax2.imshow(image_trans)
-    ax2.set_title("Transformed")
+def visualise_transformed_point_clouds(pcd_transform_correct, pcd_transform_incorrect, camera_optical_frame):
 
-    plt.show(block=False)
-    plt.pause(1)
+    # Create point cloud origin and transform by same amount as we did the actual point cloud
+    origin_pcd_transform_correct = o3d.geometry.TriangleMesh.create_sphere(0.1)
+    origin_pcd_transform_correct.transform(camera_optical_frame.inv().A)
+    origin_pcd_transform_correct.paint_uniform_color([0,0,0])
+
+    origin_pcd_transform_incorrect = o3d.geometry.TriangleMesh.create_sphere(0.1)
+    origin_pcd_transform_incorrect.transform(camera_optical_frame.A)
+    origin_pcd_transform_incorrect.paint_uniform_color([0,0,0])
+
+
+    # Create coordinate frames, where camera optical frame is now at the origin
+    base_link_coord = o3d.geometry.TriangleMesh.create_coordinate_frame()
+    base_link_coord.scale(1, center=(0, 0, 0))
+    base_link_coord.transform(camera_optical_frame.inv().A)
+    # camera frame is origin, so need to move base link frame by inverse of base link to optical frame
+
+    camera_optical_coord = o3d.geometry.TriangleMesh.create_coordinate_frame()
+    camera_optical_coord.scale(0.5, center=(0, 0, 0))
+
+    camera_optical_orig_coord = o3d.geometry.TriangleMesh.create_coordinate_frame()
+    camera_optical_orig_coord.scale(0.25, center=(0, 0, 0))
+    camera_optical_orig_coord.transform(camera_optical_frame.A)
+    # camera_optical_orig_coord.paint_uniform_color([0.2, 0.2, 0.2])
 
     # Open3d
     o3d.visualization.gui.Application.instance.initialize()
@@ -156,61 +153,47 @@ def visualise_cube_results(pcd_original, pcd, image_original, image_trans, optic
 
     w = o3d.visualization.gui.Application.instance.create_window()
 
-    # World Frame
-    world_coord = o3d.geometry.TriangleMesh.create_coordinate_frame()
-    world_coord.scale(1, center=(0, 0, 0))
+    # Correct Transform Scene
+    correct_scene = o3d.visualization.gui.SceneWidget()
+    correct_scene.scene = o3d.visualization.rendering.Open3DScene(w.renderer)
+    correct_scene.scene.add_geometry("Base", base_link_coord, mat)
+    correct_scene.scene.add_geometry("Optical", camera_optical_coord, mat)
+    correct_scene.scene.add_geometry("Pointcloud", pcd_transform_correct, mat)
+    correct_scene.scene.add_geometry("Origin", origin_pcd_transform_correct, mat)
+    # correct_scene.scene.add_geometry("OriginalCamera", camera_optical_orig_coord, mat)
+    correct_scene.setup_camera(60, correct_scene.scene.bounding_box, (0, 0, 0))
 
-    optical_coord = o3d.geometry.TriangleMesh.create_coordinate_frame()
-    optical_coord.scale(0.5, center=(0, 0, 0))
-    optical_coord.transform(optical_frame.A)
-
-    world_scene = o3d.visualization.gui.SceneWidget()
-    world_scene.scene = o3d.visualization.rendering.Open3DScene(w.renderer)
-    world_scene.scene.add_geometry("World", world_coord, mat)
-    world_scene.scene.add_geometry("Optical", optical_coord, mat)
-    world_scene.scene.add_geometry("Pointcloud", pcd_original, mat)
-    world_scene.setup_camera(60, world_scene.scene.bounding_box, (0, 0, 0))
-
-    # Optical Frame
-    optical_coord = o3d.geometry.TriangleMesh.create_coordinate_frame()
-    optical_coord.scale(0.5, center=(0, 0, 0))
-
-    world_coord = o3d.geometry.TriangleMesh.create_coordinate_frame()
-    world_coord.scale(1, center=(0, 0, 0))
-    world_coord.transform(optical_frame.inv().A)
-
-    optical_scene = o3d.visualization.gui.SceneWidget()
-    optical_scene.scene = o3d.visualization.rendering.Open3DScene(w.renderer)
-    optical_scene.scene.add_geometry("World", world_coord, mat)
-    optical_scene.scene.add_geometry("Optical", optical_coord, mat)
-    optical_scene.scene.add_geometry("Pointcloud", pcd, mat)
-    optical_scene.setup_camera(60, optical_scene.scene.bounding_box, (0, 0, 0))
+    # Incorrect Transform Scene
+    incorrect_scene = o3d.visualization.gui.SceneWidget()
+    incorrect_scene.scene = o3d.visualization.rendering.Open3DScene(w.renderer)
+    incorrect_scene.scene.add_geometry("Base", base_link_coord, mat)
+    incorrect_scene.scene.add_geometry("Optical", camera_optical_coord, mat)
+    incorrect_scene.scene.add_geometry("Pointcloud", pcd_transform_incorrect, mat)
+    incorrect_scene.scene.add_geometry("Origin", origin_pcd_transform_incorrect, mat)
+    # incorrect_scene.scene.add_geometry("OriginalCamera", camera_optical_orig_coord, mat)
+    incorrect_scene.setup_camera(60, incorrect_scene.scene.bounding_box, (0, 0, 0))
 
     # Add Child
-    w.add_child(world_scene)
-    w.add_child(optical_scene)
+    w.add_child(correct_scene)
+    w.add_child(incorrect_scene)
 
     def on_layout(theme):
         r = w.content_rect
-        world_scene.frame = o3d.visualization.gui.Rect(r.x, r.y, r.width / 2, r.height)
-        optical_scene.frame = o3d.visualization.gui.Rect(r.x + r.width / 2 + 1, r.y, r.width / 2, r.height)
+        correct_scene.frame = o3d.visualization.gui.Rect(r.x, r.y, r.width / 2, r.height)
+        incorrect_scene.frame = o3d.visualization.gui.Rect(r.x + r.width / 2 + 1, r.y, r.width / 2, r.height)
 
     w.set_on_layout(on_layout)
 
     o3d.visualization.gui.Application.instance.run()
 
 
-# def visualise_surface_results(pcd_original, image_original, block=False):
-#     # Image Vis
-#     plt.imshow(image_original)
-#     plt.show(block=block)
-#     plt.pause(1)
+def visualise_image(image):
+    f, (ax1) = plt.subplots(1,1)
+    ax1.imshow(image)
+    ax1.set_title("Image")
 
-#     # Open3d Vis
-#     world_coord = o3d.geometry.TriangleMesh.create_coordinate_frame()
-#     world_coord.scale(1, center=(0, 0, 0))
+    plt.show(block=True)
 
-#     o3d.visualization.draw_geometries([pcd_original, world_coord])
 
 
 
@@ -235,25 +218,32 @@ if __name__ == "__main__":
     pcd.colors = o3d.utility.Vector3dVector(colours)
 
     # Visualise point cloud and coordinate frames
-    print("\nVisualise the coloured cube point cloud")
-    # visualise_cube_and_coordinate_frames(pcd, camera_optical_frame)
+    print("\nVisualise the coloured cube")
+    visualise_cube_and_coordinate_frames(pcd, camera_optical_frame)
     
     # Copy original and transform point cloud to optical frame
-    pcd_original = copy.deepcopy(pcd)
-    pcd.transform(camera_optical_frame.A)
-    print(camera_optical_frame.inv())
-    print(camera_optical_frame.inv().rpy())
-    exit(0)
+    # Let's transform using current and inverse of camera optical frame transform
+    print("\nTransform the point cloud.")
+    pcd_transform_correct = copy.deepcopy(pcd)
+    pcd_transform_correct.transform(camera_optical_frame.inv().A)
 
-    # Project to image
-    image_original = project_to_image(pcd_original)
-    image_trans = project_to_image(pcd)
+    pcd_transform_incorrect = copy.deepcopy(pcd)
+    pcd_transform_incorrect.transform(camera_optical_frame.A)
+
+    # Visualise the two transformed point clouds
+    # visualise_transformed_point_clouds(pcd_transform_correct, pcd_transform_incorrect, camera_optical_frame)
+
+
+    # Project to image and visualise image
+    print("\nProjecting Image... without z-filter")
+    projected_image = project_to_image(pcd_transform_correct, False, True)
+    visualise_image(projected_image)
+
+    print("\nProjecting Image... with z-filter")
+    projected_image = project_to_image(pcd_transform_correct)
+    visualise_image(projected_image)
 
     # Visualisation
-    # if test == 'surface':
-    #     # print(image_trans[int(cam_model.height/2), int(cam_model.width/2), :])
-    #     visualise_surface_results(pcd_original, image_original, plot_blocks)
-    # else:
-    visualise_cube_results(pcd_original, pcd, image_original, image_trans, camera_optical_frame)
+    # visualise_cube_results(pcd_original, pcd, image_original, image_trans, camera_optical_frame)
 
 
