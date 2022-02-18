@@ -37,7 +37,6 @@ def init_camera_model(camera_model_path : str) -> PinholeCameraModel:
 
 
 def project_to_image(pcd, z_filter_on : bool = True, flip : bool = False, radius: int = 20):
-    # cv2.namedWindow("Image", cv2.WINDOW_NORMAL)
     image = np.ones((cam_model.height, cam_model.width, 3), dtype='uint8') * 255
 
     points = np.asarray(pcd.points)
@@ -50,6 +49,7 @@ def project_to_image(pcd, z_filter_on : bool = True, flip : bool = False, radius
         points = np.flipud(points)
         colors = np.flipud(colors)
 
+    # iterate through points
     for (point, colour) in zip(points, colors):
 
         x, y, z = point        
@@ -61,10 +61,8 @@ def project_to_image(pcd, z_filter_on : bool = True, flip : bool = False, radius
         if (u >= 0 and v >= 0) and (u < cam_model.width and v < cam_model.height):
             rr, cc = draw.ellipse(v, u, r_radius=radius, c_radius=radius, shape=image.shape) #TODO this should be more complicated shape
             image[rr,cc,:] = colour*255
-
-        # cv2.imshow("Image", image)
-        # cv2.waitKey(1)
     
+    # return projected image
     return image
 
 
@@ -90,8 +88,12 @@ def create_cube(cube_size, num_pts):
     colours[:,1] = (points[:,1] - points[:,1].min()) / (points[:,1].max() - points[:,1].min())
     colours[:,2] = (points[:,2] - points[:,2].min()) / (points[:,2].max() - points[:,2].min())
 
-    # Return points and colours
-    return points, colours
+    # Create open3d point cloud object
+    pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(points))
+    pcd.colors = o3d.utility.Vector3dVector(colours)
+
+    # Return cube
+    return pcd
 
 
 def visualise_coordinate_frames(camera_optical_frame):
@@ -210,28 +212,26 @@ if __name__ == "__main__":
 
     # Draw the two frames
     print("\nVisualising Coordinate Frames... Larger frame is base_link, smaller frame is the camera_optical frame")
-    # visualise_coordinate_frames(camera_optical_frame)
+    visualise_coordinate_frames(camera_optical_frame)
     
     # Create cube point cloud
-    points, colours = create_cube(2, 200)
-    pcd = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(points))
-    pcd.colors = o3d.utility.Vector3dVector(colours)
+    cube_pcd = create_cube(2, 200)
 
     # Visualise point cloud and coordinate frames
     print("\nVisualise the coloured cube")
-    visualise_cube_and_coordinate_frames(pcd, camera_optical_frame)
+    visualise_cube_and_coordinate_frames(cube_pcd, camera_optical_frame)
     
     # Copy original and transform point cloud to optical frame
     # Let's transform using current and inverse of camera optical frame transform
-    print("\nTransform the point cloud.")
-    pcd_transform_correct = copy.deepcopy(pcd)
+    print("\nTransforming the point cloud and visualising... left hand side is the correct transform")
+    pcd_transform_correct = copy.deepcopy(cube_pcd)
     pcd_transform_correct.transform(camera_optical_frame.inv().A)
 
-    pcd_transform_incorrect = copy.deepcopy(pcd)
+    pcd_transform_incorrect = copy.deepcopy(cube_pcd)
     pcd_transform_incorrect.transform(camera_optical_frame.A)
 
     # Visualise the two transformed point clouds
-    # visualise_transformed_point_clouds(pcd_transform_correct, pcd_transform_incorrect, camera_optical_frame)
+    visualise_transformed_point_clouds(pcd_transform_correct, pcd_transform_incorrect, camera_optical_frame)
 
 
     # Project to image and visualise image
@@ -242,8 +242,5 @@ if __name__ == "__main__":
     print("\nProjecting Image... with z-filter")
     projected_image = project_to_image(pcd_transform_correct)
     visualise_image(projected_image)
-
-    # Visualisation
-    # visualise_cube_results(pcd_original, pcd, image_original, image_trans, camera_optical_frame)
 
 
